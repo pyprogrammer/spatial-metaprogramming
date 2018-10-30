@@ -88,4 +88,53 @@ object Utils {
 }
 ```
 
-Note that since these techniques are simply Scala at this point, we can use almost arbitrary constructs inside of the access functions (if the function is defined inside of the `@spatial` object we're still subject to the compiler rewrites).
+Note that since these techniques are simply Scala at this point, we can use almost arbitrary constructs inside of the access functions with the catch that functions defined inside of the `@spatial` object are still subject to the compiler rewrites.
+
+
+## Type-ical Metaprogramming
+One thing to note is that all metaprogramming so far is done at the Scala level, meaning that while we have flexibility on the computation, we do not have the ability to directly interact with the types involved.
+
+This problem arises when we wish to do a data-dependent generation of types. For example, if we know that a particular array is to be loaded into a SRAM, then we can size the individual elements to be precisely the correct precision.
+
+```scala
+// Array values
+val values = Array(1.125, 2.25, 1.3125, 2.75)
+
+// Proper S, I, F format can be easily computed from the data.
+
+val sign = values.exists { _ < 0 }
+val integer = (values map {x => if (x > 0) log2(x) else log2(-x + 1)}).max
+val frac = (Stream.from(0).find {
+  shift => values forall {
+    value =>
+    {
+      val low_prec = (value << shift).round / pow(2, shift)
+      abs(low_prec - value) < error
+    }
+  }
+}).get
+```
+
+However, since we represent numerical formats by type (i.e. `FixPt[TRUE, _3, _13]`), we are unable to actually create such a value. However, with a fair bit of magic we can make this happen.
+
+```scala
+// Note that quasiquoting + eval essentially discards all compiler type-checking between the quasiquoted portion and the rest of the program.
+
+import scala.reflect.runtime.currentMirror
+import scala.tools.reflect.ToolBox
+import scala.reflect.runtime.universe._
+
+def createFixPt(sign: Boolean, integer: Int, fractional: Int, value: Double): FixPt[_, _, _] = {
+  val toolbox = currentMirror.mkToolBox()
+  val signType = TypeName(if (sign) "TRUE" else "FALSE")
+  val intName = TypeName(s"_$integer")
+  val fracName = TypeName(s"_$fractional")
+  val qq = tq"spatial.lang.FixPt[$signType, $intName, $fracName]"
+
+  val constant = Literal(Constant(value))
+
+  toolbox.eval(
+    q"argon.lang.uconst[$qq](spatial.emul.FixedPoint.fromDouble($constant))"
+  ).asInstanceOf[FixPt[_, _, _]]
+}
+```
